@@ -1,71 +1,70 @@
 # QQ Enhanced Bypass
 
-一个全面的 QQ 环境检测绕过模块，基于对 QQ 检测机制的深度分析开发。面向研究目标 QQ 9.3.50 (com.tencent.mobileqq)。
+一个 QQ 环境检测绕过模块，适配 QQ 9.3.50 (com.tencent.mobileqq)。
 
 本项目经过多轮测试，已没有太大问题，如过账号还是频繁掉线，可能是账号风控，请尝试QQ会员解决（
 
+## 适配版本
+
+- **目标版本：QQ 9.3.50 (versionCode 15730)**
+- 其他版本可能无法正常工作
+
 ## 项目特点
 
-### 1. DexKit 动态定位（抗版本更新）
-启动时用 [DexKit](https://github.com/LuckyPray/DexKit) 按**稳定特征**（引用的字符串常量、调用的方法、参数类型）在运行时定位检测点，QQ 更新改名后仍能命中。例如：
-- Turing 的 `/proc` 进程读取器 → 按字符串 `"/proc/%d/cmdline"` 定位（不依赖 `Pomegranate`/`oqKCa` 这类会变的混淆名）
-- 踢下线处理器 → 按签名（`void` + `Constants$LogoutReason` 参数）定位，不依赖方法名 `b`
+### 1. 多层 Hook 架构
+通过多层 Hook 机制覆盖 QQ 的各类检测点，包括网络上报、Root 检测、Xposed 检测、设备信息验证等。
 
-语义名较稳的入口（`MsfCore.sendSsoMsg`、`ChannelManager.checkMethod` 等）保留直接 hook。
-
-### 2. 框架级通用 hook（版本无关）
-Root/命令探测走 Android 框架的固定 choke point，天然不随 QQ 版本变化：
+### 2. 框架级通用 Hook
+Root/命令探测走 Android 框架的固定接口：
 - `File.exists()` → 对 su 路径等返回 false
 - `ProcessBuilder.start()` → 把 `type su` 等 root 探测重写为无害的 `exit 1`
 - `Debug.isDebuggerConnected()` → 返回 false
 
-### 3. Native 层（ByteHook）
-通过 [ByteHook](https://github.com/bytedance/bytehook) PLT hook 处理 native 检测（libc 的 `fopen`/`system` 等），与 Java 层由 `UnifiedHookCoordinator` 统一协调。
+### 3. Native 层支持
+通过 [ByteHook](https://github.com/bytedance/bytehook) PLT hook 处理 native 检测（libc 的 `fopen`/`system` 等）。
 
 ### 4. 配置系统
 通过 `HookConfig` 类集中管理功能开关、设备信息伪造配置、日志开关。
 
 ## 架构与 Hook 层
 
-模块入口 `XposedEntry` 只对目标包 `com.tencent.mobileqq` 生效，并按进程门控：
-DexKit 解析整个 APK（~112MB）开销较大，**只在主进程**执行，子进程（`:MSF` 等）
-仅保留成本低的框架级 hook。各层由 `UnifiedHookCoordinator` 协调，Native 层在后台异步安装。
+模块入口 `XposedEntry` 只对目标包 `com.tencent.mobileqq` 生效，并按进程门控。
+各层由 `UnifiedHookCoordinator` 协调，Native 层在后台异步安装。
 
 ### Layer 1 — 网络上报拦截 (NetworkReportHook)
-在 report 入口按**命令字符串**过滤（版本无关的过滤逻辑）：
-- `MsfCore.sendSsoMsg`、`ChannelProxyExt.sendMessage/sendMessageInner`（语义名，较稳）
+在 report 入口按命令字符串过滤：
+- `MsfCore.sendSsoMsg`、`ChannelProxyExt.sendMessage/sendMessageInner`
 - 拦截命令：`trpc.o3.report`、`trpc.o3.mobile_security`、`trpc.ilive_cdn.report`、`OidbSvc.0xd79`
-- TuringFD `/proc` 进程读取器：DexKit 按 `"/proc/%d/cmdline"` 定位，仅中和 String 返回的重载
+- TuringFD `/proc` 进程读取器拦截
 - 返回类型安全：只在 `void`/`int`/`long` 等安全类型上改写返回值，避免 `ClassCastException`
 
 ### Layer 2 — Root 检测 (DynamicRootDetectionHook)
 - 通用 `File.exists()` hook：对 su 路径 / magisk / lsposed 等返回 false
-- DexKit 定位引用了**字面 su 路径**（`/system/bin/su` 等）且调用 `File.exists` 的检测方法
+- 定位引用了 su 路径且调用 `File.exists` 的检测方法
 
 ### Layer 3 — Xposed/Hook 框架检测 (DynamicXposedDetectionHook)
-DexKit 定位 ArtMethod 检测、`/proc/self/maps` 读取器、QSec hook 检测，
+定位 ArtMethod 检测、`/proc/self/maps` 读取器、QSec hook 检测，
 中和其布尔/整型结果，并过滤 maps 输出中的 xposed/lsposed/magisk/自身库特征。
 
 ### Layer 4 — 设备信息一致性 (DynamicDeviceInfoHook)
-DexKit 定位 IMEI/AndroidID/Serial 读取器，监控交叉验证（默认不伪造，`FAKE_*` 为 null）。
+定位 IMEI/AndroidID/Serial 读取器，监控交叉验证（默认不伪造，`FAKE_*` 为 null）。
 
 ### Layer 5 — 调试/模拟器检测 (DynamicDebugDetectionHook)
 - 通用 `Debug.isDebuggerConnected()` → false
-- DexKit 定位 TracerPid 读取器、模拟器特征检测
+- 定位 TracerPid 读取器、模拟器特征检测
 
 ### Layer 6 — Runtime 监控 (DynamicRuntimeMonitorHook)
 - 通用 `ProcessBuilder.start()` hook：root 探测（`type su` 等）重写为 `exit 1`
 
 ### Layer 7 — QQ 9.3.50 检测点补全 (QQ950PatchHook)
-针对经 dex 分析核实存在的风控数据源，按**签名**（非硬编码方法名）定位：
-- 踢下线处理器 `NTKickProcessor`（void + `LogoutReason` 参数）
-- Turing 缓存写入 `TuringWrapper`（static void 无参）
-- `TuringRiskService.reqRiskDetectV2`、`TuringIDService.getTuringDID*`、MSF 遥测上报（语义名）
+针对 QQ 9.3.50 版本的特定检测点：
+- 踢下线处理器 `NTKickProcessor`
+- Turing 缓存写入 `TuringWrapper`
+- `TuringRiskService.reqRiskDetectV2`、`TuringIDService.getTuringDID*`、MSF 遥测上报
 
 ### Native 层 (NativeBypass / UnifiedHookCoordinator)
 通过 ByteHook 安装 libc PLT hook（`fopen`/`system` 等），处理 native 侧的
-`/proc` 扫描与命令执行探测。libfekit.so / libturingxq.so 的深度检测仍是难点，
-见「局限性」。
+`/proc` 扫描与命令执行探测。
 
 ## 安装与使用
 
@@ -73,7 +72,7 @@ DexKit 定位 IMEI/AndroidID/Serial 读取器，监控交叉验证（默认不�
 - Root 设备（Magisk / KernelSU）
 - LSPosed 或 EdXposed 框架
 - Android 8.0+ (API 26+)
-- 目标：QQ (com.tencent.mobileqq)
+- 目标：QQ 9.3.50 (com.tencent.mobileqq)
 
 ### 编译
 用 Android Studio 打开项目直接构建，或用本机 Gradle（AGP 8.0.2，需 JDK 17）：
@@ -113,26 +112,21 @@ public static String FAKE_SERIAL = null;
 
 ## 局限性
 
-### 1. Native 层检测无法绕过
-本模块仅处理 Java 层检测。Native 库（libfekit.so, libturingxq.so）的检测需要：
+### 1. 版本兼容性
+**本模块仅适配 QQ 9.3.50 (versionCode 15730)**，其他版本由于类名、方法名、调用关系不同，无法保证正常工作。QQ 更新后需要重新适配。
+
+### 2. Native 层检测限制
+本模块处理了部分 Java 层检测。Native 库（libfekit.so, libturingxq.so）的深度检测可能需要：
 - Frida/Dobby 等 native hook 框架
 - 内存补丁
 - 二进制修改
 
-### 2. 服务端风控决策
+### 3. 服务端风控决策
 客户端绕过只是第一步，腾讯服务端会综合判断：
 - 历史行为模式
 - 设备指纹变化
 - 多维度风险评分
 - IP/网络环境
-
-### 3. 版本兼容性
-QQ 频繁更新，混淆类名/方法名会变化。本模块用 DexKit 按特征动态定位以缓解这一问题，
-但特征本身（字符串常量、调用关系）若被改动仍可能失效。
-- 目标版本：QQ 9.3.50 (versionCode 15730)
-- 混淆名（Turing 水果类、单字母方法）已改为 DexKit/签名定位；语义名入口直接 hook
-
-新版本若改动了所依赖的特征，仍需更新定位规则。
 
 ### 4. LSPosed 自身检测
 本模块试图隐藏 LSPosed，但 native 层检测（maps 扫描、ArtMethod 校验）仍然有效。最佳实践：
@@ -142,25 +136,15 @@ QQ 频繁更新，混淆类名/方法名会变化。本模块用 DexKit 按特�
 
 ## 技术细节
 
-### 定位策略：三种手段按目标选用
-- **框架级 choke point**（`File.exists`/`ProcessBuilder.start`/`Debug.isDebuggerConnected`）——
-  Android 固定 API，版本无关，成本最低，作为兜底。
-- **DexKit 特征定位**——针对混淆名（会随版本变），按字符串常量/调用/参数类型命中。
-  指纹力求精确，避免误伤：例如 su 检测用**字面 su 路径**并集 + `File.exists` 约束，
-  而非裸子串 `"su"`（后者会匹配 result/measure/… 等大量无辜方法）。
-- **反射按签名**——类名语义稳定、仅方法名混淆时（如 `NTKickProcessor`），
-  用「返回类型 + 参数类型」在类内定位，避免写死方法名。
+### Hook 策略
+- **框架级接口**（`File.exists`/`ProcessBuilder.start`/`Debug.isDebuggerConnected`）——
+  Android 固定 API，版本无关，作为兜底。
+- **特征定位**——针对混淆名，按字符串常量/调用/参数类型命中。
+- **反射按签名**——用返回类型 + 参数类型在类内定位，避免写死方法名。
 
 ### 返回类型安全
 改写被 hook 方法的返回值时，只对 `void`/`int`/`long`/`Object` 等类型安全的情况操作。
-对返回基本类型的方法误用 `setResult(null)` 会在 Xposed `proceed()` 里触发
-**不可捕获的 `ClassCastException`**，导致整进程崩溃——已在各处按实际返回类型规避。
-
-### 冷启动稳健性
-- `DexKitBridge.create()` 的失败（如首次 `libdexkit.so` 未注册的 `UnsatisfiedLinkError`）
-  用 `catch (Throwable)` 兜住，init 失败仅静默降级，不再崩溃进程。
-- 单一共享 bridge + `awaitReady()`：全部 hook 复用同一个 bridge，避免重复解析 APK，
-  也消除了「扫描未完成就读空结果」的竞态。
+对返回基本类型的方法误用 `setResult(null)` 会触发 `ClassCastException`，导致整进程崩溃。
 
 ## 进阶方案
 
@@ -182,16 +166,6 @@ QQ 频繁更新，混淆类名/方法名会变化。本模块用 DexKit 按特�
 - VirtualXposed（已过时）
 - 太极/无极（兼容性问题）
 - Patch 版 QQ（风险高）
-
-## 开发路线图
-
-- [x] Java 层多模块 hook 实现
-- [x] Native hook 支持（ByteHook PLT hook）
-- [x] DexKit 动态定位（抗版本更新），替换硬编码混淆名
-- [x] 主进程门控 + 单一共享 DexKit bridge（降低冷启动开销）
-- [ ] 设备指纹一致性增强
-- [ ] libfekit / libturingxq 深度检测的 native 应对
-- [ ] 配置文件支持（无需重新编译）
 
 ## 免责声明
 
